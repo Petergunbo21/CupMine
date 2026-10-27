@@ -12,7 +12,7 @@ namespace CupMine
     //  - Your character is drawn as a blocky pixel hero
     //  - Blocky green "creepers" wander in and go poof (cosmetic only, they never hurt you)
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.1.0")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
@@ -42,6 +42,9 @@ namespace CupMine
             public SpriteRenderer sr;
             public Vector3 vel;
             public float life;
+            public float maxLife = 0.7f;
+            public float gravity = 6f;
+            public Color tint = Color.white;
         }
 
         readonly List<Skinned> skinned = new List<Skinned>();
@@ -57,7 +60,11 @@ namespace CupMine
         int hp = -1;
         int selected;
         float groundY = float.MaxValue;
-        float skinScale = 1f;
+        float skinScale = 0.75f;
+        Sprite[] blockSprites;
+        Vector3 playerPos;
+        bool havePlayer;
+        int skinWarn;
         int skinLayerId;
         int skinOrder;
 
@@ -236,6 +243,12 @@ namespace CupMine
             }
             icons[4] = gem.ToTexture();
 
+            blockSprites = new Sprite[icons.Length];
+            for (int i = 0; i < icons.Length; i++)
+            {
+                blockSprites[i] = Sprite.Create(icons[i], new Rect(0, 0, 16, 16), new Vector2(0.5f, 0f), 16f);
+            }
+
             var s = new Pix(1, 1);
             s.Rect(0, 0, 1, 1, new Color32(30, 30, 30, 200), 0);
             slotTex = s.ToTexture();
@@ -331,6 +344,11 @@ namespace CupMine
                 {
                     if (Input.GetKeyDown(KeyCode.Alpha1 + i)) selected = i;
                 }
+
+                // Controller: Back/Select = next slot, left stick click = previous, right stick click = use.
+                if (Input.GetKeyDown(KeyCode.JoystickButton6)) selected = (selected + 1) % icons.Length;
+                if (Input.GetKeyDown(KeyCode.JoystickButton8)) selected = (selected + icons.Length - 1) % icons.Length;
+                if (Input.GetKeyDown(KeyCode.JoystickButton9) || Input.GetKeyDown(KeyCode.E)) UseItem(selected);
             }
 
             TickCreepers();
@@ -368,6 +386,33 @@ namespace CupMine
             inLevel = found.Count > 0;
             hp = inLevel ? ReadHealth() : -1;
 
+            havePlayer = inLevel;
+            if (inLevel)
+            {
+                Transform pt = found[0].transform;
+                playerPos = pt.position;
+
+                // Learn where the ground is and which draw layer the player uses,
+                // even if the blocky skin can't be applied.
+                SpriteRenderer[] prs = GetRenderers(pt, false);
+                int lid, ord;
+                if (prs.Length > 0 && ComputeSort(prs, out lid, out ord))
+                {
+                    skinLayerId = lid;
+                    skinOrder = ord + 1;
+                    Bounds pb = new Bounds();
+                    bool pany = false;
+                    foreach (var r in prs)
+                    {
+                        if (!r.enabled || r.sprite == null) continue;
+                        if (!pany) { pb = r.bounds; pany = true; }
+                        else pb.Encapsulate(r.bounds);
+                    }
+                    if (pany && pb.min.y < groundY) groundY = pb.min.y;
+                }
+                if (groundY == float.MaxValue) groundY = playerPos.y;
+            }
+
             for (int i = skinned.Count - 1; i >= 0; i--)
             {
                 if (skinned[i].root == null)
@@ -395,7 +440,7 @@ namespace CupMine
         void RefreshHidden(Skinned s)
         {
             s.hidden.Clear();
-            foreach (var r in s.root.GetComponentsInChildren<SpriteRenderer>(true))
+            foreach (var r in GetRenderers(s.root, true))
             {
                 if (r.gameObject != s.skin) s.hidden.Add(r);
             }
@@ -403,27 +448,33 @@ namespace CupMine
 
         void ApplySkin(Transform root)
         {
-            SpriteRenderer[] rs = root.GetComponentsInChildren<SpriteRenderer>(false);
+            SpriteRenderer[] rs = GetRenderers(root, false);
             Bounds b = new Bounds();
             bool any = false;
-            int order = 0;
-            int layer = 0;
             foreach (var r in rs)
             {
                 if (!r.enabled || r.sprite == null) continue;
                 if (!any)
                 {
                     b = r.bounds;
-                    layer = r.sortingLayerID;
                     any = true;
                 }
                 else
                 {
                     b.Encapsulate(r.bounds);
                 }
-                if (r.sortingOrder > order) order = r.sortingOrder;
             }
-            if (!any) return; // sprites not ready yet, try again next scan
+
+            int layer, order;
+            if (!any || !ComputeSort(rs, out layer, out order))
+            {
+                if (skinWarn < 3)
+                {
+                    skinWarn++;
+                    Logger.LogInfo("Skin: no usable sprites under " + root.name + " (renderers found: " + rs.Length + ")");
+                }
+                return; // sprites not ready yet, try again next scan
+            }
 
             float height = Mathf.Clamp(b.size.y, 0.4f, 6f);
             float scale = height / 2f; // the blocky sprite is 2 world units tall at scale 1
@@ -450,30 +501,64 @@ namespace CupMine
             skinLayerId = layer;
             skinOrder = order + 1;
             if (b.min.y < groundY) groundY = b.min.y;
+
+            Logger.LogInfo("Skin applied to " + root.name + ": renderers=" + rs.Length +
+                " height=" + b.size.y.ToString("0.00") + " layerId=" + layer + " order=" + (order + 1));
+        }
+
+        // Finds the sprites that draw this player. If the controller object has none of its own,
+        // look one level up in case the art sits on the parent object.
+        SpriteRenderer[] GetRenderers(Transform root, bool includeInactive)
+        {
+            SpriteRenderer[] rs = root.GetComponentsInChildren<SpriteRenderer>(includeInactive);
+            if (rs.Length == 0 && root.parent != null)
+            {
+                SpriteRenderer[] up = root.parent.GetComponentsInChildren<SpriteRenderer>(includeInactive);
+                if (up.Length > 0 && up.Length <= 12) return up;
+            }
+            return rs;
+        }
+
+        // Picks the draw layer and order of whichever sprite is drawn in front, so the skin
+        // is never hidden behind the level.
+        bool ComputeSort(SpriteRenderer[] rs, out int layerId, out int order)
+        {
+            layerId = 0;
+            order = 0;
+            int bestValue = int.MinValue;
+            bool first = true;
+            foreach (var r in rs)
+            {
+                if (!r.enabled || r.sprite == null) continue;
+                int value = SortingLayer.GetLayerValueFromID(r.sortingLayerID);
+                if (first || value > bestValue || (value == bestValue && r.sortingOrder > order))
+                {
+                    bestValue = value;
+                    layerId = r.sortingLayerID;
+                    order = r.sortingOrder;
+                    first = false;
+                }
+            }
+            return !first;
         }
 
         // ------------------------------------------------------------------ creepers
 
         void TickCreepers()
         {
-            if (!cfgCreepers.Value || !inLevel || skinned.Count == 0 || groundY == float.MaxValue) return;
+            if (!havePlayer || groundY == float.MaxValue) return;
             Camera cam = Camera.main;
-            if (cam == null || !cam.orthographic) return;
 
             float dt = Time.deltaTime;
-            spawnTimer -= dt;
-            if (spawnTimer <= 0f && creepers.Count < 3)
+            if (cfgCreepers.Value && inLevel && cam != null && cam.orthographic)
             {
-                spawnTimer = UnityEngine.Random.Range(5f, 10f);
-                SpawnCreeper(cam);
+                spawnTimer -= dt;
+                if (spawnTimer <= 0f && creepers.Count < 3)
+                {
+                    spawnTimer = UnityEngine.Random.Range(5f, 10f);
+                    SpawnCreeper(cam);
+                }
             }
-
-            GameObject target = null;
-            foreach (var s in skinned)
-            {
-                if (s.skin != null) { target = s.skin; break; }
-            }
-            if (target == null) return;
 
             for (int i = creepers.Count - 1; i >= 0; i--)
             {
@@ -481,7 +566,7 @@ namespace CupMine
                 if (c.go == null) { creepers.RemoveAt(i); continue; }
 
                 Vector3 pos = c.go.transform.position;
-                float dx = target.transform.position.x - pos.x;
+                float dx = playerPos.x - pos.x;
                 float near = 1.4f * skinScale;
 
                 if (c.fuse < 0f)
@@ -545,8 +630,82 @@ namespace CupMine
                     go = go,
                     sr = sr,
                     vel = new Vector3(Mathf.Cos(ang) * spd, Mathf.Sin(ang) * spd + 1f, 0f),
-                    life = 0.7f
+                    life = 0.7f,
+                    maxLife = 0.7f,
+                    gravity = 6f,
+                    tint = Color.white
                 });
+            }
+        }
+
+        // Cyan sparkle burst (diamond slot).
+        void Sparkle(Vector3 at)
+        {
+            for (int i = 0; i < 24; i++)
+            {
+                var go = new GameObject("CupMineSparkle");
+                var sr = go.AddComponent<SpriteRenderer>();
+                sr.sprite = puffSprite;
+                sr.sortingLayerID = skinLayerId;
+                sr.sortingOrder = skinOrder + 2;
+                go.transform.position = at;
+                float size = skinScale * UnityEngine.Random.Range(0.4f, 0.9f);
+                go.transform.localScale = new Vector3(size, size, 1f);
+
+                float ang = UnityEngine.Random.Range(0f, 6.2831f);
+                float spd = UnityEngine.Random.Range(1.0f, 3.5f) * skinScale;
+                puffs.Add(new Puff
+                {
+                    go = go,
+                    sr = sr,
+                    vel = new Vector3(Mathf.Cos(ang) * spd, Mathf.Sin(ang) * spd, 0f),
+                    life = 1.0f,
+                    maxLife = 1.0f,
+                    gravity = 0f,
+                    tint = new Color(0.3f, 0.95f, 0.95f, 1f)
+                });
+            }
+        }
+
+        // Stone and grass slots: drop a block next to the player that fades away after a few seconds.
+        void PlaceBlock(int slot)
+        {
+            var go = new GameObject("CupMineBlock");
+            var sr = go.AddComponent<SpriteRenderer>();
+            sr.sprite = blockSprites[slot];
+            sr.sortingLayerID = skinLayerId;
+            sr.sortingOrder = skinOrder;
+            go.transform.position = new Vector3(playerPos.x + 1.3f * skinScale, groundY, 0f);
+            go.transform.localScale = new Vector3(skinScale, skinScale, 1f);
+            puffs.Add(new Puff
+            {
+                go = go,
+                sr = sr,
+                vel = Vector3.zero,
+                life = 4f,
+                maxLife = 4f,
+                gravity = 0f,
+                tint = Color.white
+            });
+        }
+
+        void UseItem(int slot)
+        {
+            if (!havePlayer || groundY == float.MaxValue) return;
+            switch (slot)
+            {
+                case 0:
+                case 1:
+                    PlaceBlock(slot);
+                    break;
+                case 2:
+                case 3:
+                    Camera cam = Camera.main;
+                    if (cam != null && cam.orthographic && creepers.Count < 6) SpawnCreeper(cam);
+                    break;
+                default:
+                    Sparkle(playerPos + new Vector3(0f, skinScale, 0f));
+                    break;
             }
         }
 
@@ -564,9 +723,9 @@ namespace CupMine
                     puffs.RemoveAt(i);
                     continue;
                 }
-                p.vel.y -= 6f * dt;
+                p.vel.y -= p.gravity * dt;
                 p.go.transform.position += p.vel * dt;
-                p.sr.color = new Color(1f, 1f, 1f, Mathf.Clamp01(p.life / 0.7f));
+                p.sr.color = new Color(p.tint.r, p.tint.g, p.tint.b, Mathf.Clamp01(p.life / p.maxLife));
             }
         }
 
@@ -586,6 +745,16 @@ namespace CupMine
             for (int i = 0; i < n; i++)
             {
                 var r = new Rect(x0 + i * (s + gap), y, s, s);
+
+                // Tap or click a slot to select it; tap the selected slot again to use it.
+                Event ev = Event.current;
+                if (ev.type == EventType.MouseDown && r.Contains(ev.mousePosition))
+                {
+                    if (selected == i) UseItem(i);
+                    else selected = i;
+                    ev.Use();
+                }
+
                 GUI.DrawTexture(r, slotTex);
                 if (i == selected)
                 {
