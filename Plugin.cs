@@ -12,7 +12,7 @@ namespace CupMine
     //  - Your character is drawn as a blocky pixel hero
     //  - Blocky green "creepers" wander in and go poof (cosmetic only, they never hurt you)
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.2.0")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.6.0")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
@@ -20,11 +20,20 @@ namespace CupMine
         Texture2D slotTex, selTex, heartTex;
         Texture2D[] icons;
         Sprite playerSprite, creeperSprite, puffSprite;
+        Sprite[] playerFrames;
 
         class Skinned
         {
             public Transform root;
             public GameObject skin;
+            public SpriteRenderer skinSr;
+            public float lastX;
+            public float lastY;
+            public float animT;
+            public float faceDir = 1f;
+            public int mapView;       // 0 = front, 1 = back, 2 = side
+            public bool isMap;
+            public bool hasLast;
             public List<Renderer> hidden = new List<Renderer>();
         }
 
@@ -55,6 +64,7 @@ namespace CupMine
         static readonly string[] PlayerTypeNames = { "LevelPlayerController", "MapPlayerController" };
 
         float scanTimer;
+        float buildTimer;
         float spawnTimer = 4f;
         bool inLevel;
         int hp = -1;
@@ -156,28 +166,194 @@ namespace CupMine
             return new Color32((byte)r, (byte)g, (byte)b, 255);
         }
 
+        // The player's persona: a fluffy black puppy with horns, a blue flame, a baggy white shirt,
+        // dark pants and a fluffy tail with a white tip.
+        // view: 0 = front, 1 = back, 2 = side (faces right). step: 0 = stand, 1/2 = walk.
+        // build: 0 = none, 1 = arm raised, 2 = arm down holding a block. flame: 0/1 flicker.
+        Sprite MakePlayerFrame(int view, int step, int build, int flame)
+        {
+            var p = new Pix(16, 36);
+            Color32 fur = C(28, 28, 36), furLight = C(58, 58, 72), hair = C(18, 18, 26);
+            Color32 eye = C(8, 8, 14), rim = C(70, 110, 235), white = C(250, 250, 250), heart = C(230, 40, 55);
+            Color32 shirt = C(236, 236, 242), shirtShade = C(188, 190, 206);
+            Color32 pants = C(46, 54, 80), pantsDark = C(32, 38, 60);
+            Color32 horn = C(205, 205, 210), spike = C(235, 195, 80);
+            Color32 fireA = C(60, 130, 255), fireB = C(150, 205, 255), fireC = C(235, 246, 255);
+            Color32 tip = C(240, 240, 246);
+
+            int lLift = step == 1 ? 2 : 0;
+            int rLift = step == 2 ? 2 : 0;
+            int lArm = step == 2 ? 1 : 0;
+            int rArm = step == 1 ? 1 : 0;
+
+            if (view == 2)
+            {
+                // side view, facing right
+                int ax = 5, bx = 8, aLift = 0, bLift = 0;
+                if (step == 1) { ax = 4; bx = 9; bLift = 1; }
+                else if (step == 2) { ax = 8; bx = 5; aLift = 1; }
+                int tailY = step == 1 ? 12 : (step == 2 ? 10 : 11);
+                int armX = step == 1 ? 6 : (step == 2 ? 8 : 7);
+
+                p.Rect(1, tailY, 4, 3, fur, 3);
+                p.Rect(0, tailY + 2, 2, 2, tip, 0);
+                p.Rect(bx, bLift, 3, 10 - bLift, pantsDark, 4);
+                p.Rect(ax, aLift, 3, 10 - aLift, pants, 4);
+                p.Rect(bx, bLift, 4, 2, fur, 3);
+                p.Rect(ax, aLift, 4, 2, fur, 3);
+                p.Rect(4, 10, 8, 10, shirt, 5);
+                p.Rect(4, 10, 8, 1, shirtShade, 0);
+                p.Rect(4, 10, 1, 10, shirtShade, 0);
+                p.Rect(armX - 1, 13, 4, 7, shirt, 5);
+                p.Rect(armX - 1, 13, 4, 1, shirtShade, 0);
+                p.Rect(armX, 10, 3, 3, fur, 3);
+                p.Rect(4, 20, 9, 12, fur, 3);
+                p.Rect(13, 21, 2, 3, fur, 3);
+                p.Rect(14, 23, 1, 1, furLight, 0);
+                p.Rect(9, 22, 3, 5, eye, 0);
+                p.Rect(9, 22, 3, 1, rim, 0);
+                p.Rect(10, 25, 1, 1, white, 0);
+                p.Rect(10, 23, 1, 1, heart, 0);
+                p.Rect(4, 26, 9, 6, hair, 3);
+                p.Rect(12, 25, 2, 4, hair, 3);
+                p.Rect(4, 24, 2, 3, hair, 3);
+
+                // ear, horn, spikes and flame
+                p.Rect(5, 32, 3, 2, fur, 3);
+                p.Rect(5, 34, 2, 1, fur, 0);
+                p.Rect(8, 32, 1, 3, horn, 6);
+                p.Rect(9, 33, 1, 1, spike, 0);
+                p.Rect(7, 34, 1, 1, spike, 0);
+                p.Rect(9, 32, 2, 2, fireA, 0);
+                if (flame == 0)
+                {
+                    p.Rect(9, 34, 2, 2, fireB, 0);
+                }
+                else
+                {
+                    p.Rect(10, 34, 1, 2, fireB, 0);
+                    p.Rect(9, 34, 1, 1, fireA, 0);
+                }
+                p.Rect(9, 32, 2, 1, fireC, 0);
+            }
+            else
+            {
+                // front (0) and back (1) views
+                p.Rect(4, lLift, 4, 10 - lLift, pants, 4);
+                p.Rect(8, rLift, 4, 10 - rLift, pants, 4);
+                p.Rect(7, 2, 2, 8, pantsDark, 0);
+                p.Rect(3, lLift, 5, 2, fur, 3);
+                p.Rect(8, rLift, 5, 2, fur, 3);
+                p.Rect(5, lLift, 1, 1, furLight, 0);
+                p.Rect(10, rLift, 1, 1, furLight, 0);
+
+                if (view == 0)
+                {
+                    p.Rect(12, 4, 4, 4, fur, 3);
+                    p.Rect(14, 8, 2, 2, tip, 0);
+                }
+
+                p.Rect(3, 10, 10, 10, shirt, 5);
+                p.Rect(3, 10, 10, 1, shirtShade, 0);
+                p.Rect(3, 10, 1, 10, shirtShade, 0);
+                if (view == 0)
+                {
+                    p.Rect(7, 12, 1, 6, shirtShade, 0);
+                }
+                else
+                {
+                    int dx = step == 1 ? -1 : (step == 2 ? 1 : 0);
+                    p.Rect(11 + dx, 6, 4, 7, fur, 3);
+                    p.Rect(12 + dx, 12, 3, 2, tip, 0);
+                }
+
+                p.Rect(0, 13, 3, 7, shirt, 5);
+                p.Rect(0, 13, 3, 1, shirtShade, 0);
+                p.Rect(0, 10 + lArm, 3, 3 - lArm, fur, 3);
+                if (build == 1)
+                {
+                    p.Rect(13, 16, 3, 3, shirt, 5);
+                    p.Rect(14, 19, 2, 3, shirt, 5);
+                    p.Rect(14, 22, 2, 2, fur, 3);
+                }
+                else if (build == 2)
+                {
+                    p.Rect(13, 13, 3, 7, shirt, 5);
+                    p.Rect(13, 10, 3, 3, fur, 3);
+                    p.Rect(14, 8, 2, 2, C(125, 125, 125), 20);
+                }
+                else
+                {
+                    p.Rect(13, 13, 3, 7, shirt, 5);
+                    p.Rect(13, 13, 3, 1, shirtShade, 0);
+                    p.Rect(13, 10 + rArm, 3, 3 - rArm, fur, 3);
+                }
+
+                p.Rect(2, 20, 12, 12, fur, 3);
+                p.Rect(1, 21, 1, 3, fur, 3);
+                p.Rect(14, 21, 1, 3, fur, 3);
+                if (view == 0)
+                {
+                    p.Rect(3, 22, 4, 5, eye, 0);
+                    p.Rect(9, 22, 4, 5, eye, 0);
+                    p.Rect(3, 22, 4, 1, rim, 0);
+                    p.Rect(9, 22, 4, 1, rim, 0);
+                    p.Rect(5, 25, 1, 1, white, 0);
+                    p.Rect(11, 25, 1, 1, white, 0);
+                    p.Rect(4, 23, 1, 1, heart, 0);
+                    p.Rect(10, 23, 1, 1, heart, 0);
+                    p.Rect(7, 21, 2, 1, furLight, 0);
+                }
+                p.Rect(1, 26, 14, 6, hair, 3);
+                p.Rect(2, 25, 2, 1, hair, 3);
+                p.Rect(6, 25, 3, 1, hair, 3);
+                p.Rect(12, 25, 2, 1, hair, 3);
+                if (view == 1) p.Rect(1, 20, 14, 6, hair, 3);
+
+                // ears, horns, spikes and flame
+                p.Rect(2, 32, 3, 2, fur, 3);
+                p.Rect(2, 34, 2, 1, fur, 0);
+                p.Rect(11, 32, 3, 2, fur, 3);
+                p.Rect(12, 34, 2, 1, fur, 0);
+                p.Rect(5, 32, 1, 3, horn, 6);
+                p.Rect(10, 32, 1, 3, horn, 6);
+                p.Rect(4, 33, 1, 1, spike, 0);
+                p.Rect(11, 33, 1, 1, spike, 0);
+                p.Rect(6, 34, 1, 1, spike, 0);
+                p.Rect(9, 34, 1, 1, spike, 0);
+                p.Rect(7, 32, 2, 2, fireA, 0);
+                p.Rect(6, 33, 1, 1, fireA, 0);
+                p.Rect(9, 33, 1, 1, fireA, 0);
+                if (flame == 0)
+                {
+                    p.Rect(7, 34, 2, 2, fireB, 0);
+                }
+                else
+                {
+                    p.Rect(8, 34, 1, 2, fireB, 0);
+                    p.Rect(7, 34, 1, 1, fireA, 0);
+                }
+                p.Rect(7, 32, 2, 1, fireC, 0);
+            }
+
+            return Sprite.Create(p.ToTexture(), new Rect(0, 0, 16, 36), new Vector2(0.5f, 0f), 16f);
+        }
+
         void BuildArt()
         {
-            // Player: 16 x 32
-            var p = new Pix(16, 32);
-            p.Rect(4, 0, 4, 12, C(70, 60, 150), 6);   // left leg
-            p.Rect(8, 0, 4, 12, C(70, 60, 150), 6);   // right leg
-            p.Rect(4, 0, 8, 2, C(60, 60, 60), 4);     // shoes
-            p.Rect(4, 12, 8, 12, C(40, 160, 170), 6); // body
-            p.Rect(0, 18, 4, 6, C(40, 160, 170), 6);  // left sleeve
-            p.Rect(12, 18, 4, 6, C(40, 160, 170), 6); // right sleeve
-            p.Rect(0, 12, 4, 6, C(190, 140, 110), 6); // left hand
-            p.Rect(12, 12, 4, 6, C(190, 140, 110), 6);// right hand
-            p.Rect(4, 24, 8, 8, C(190, 140, 110), 6); // head
-            p.Rect(4, 30, 8, 2, C(70, 45, 30), 4);    // hair top
-            p.Rect(4, 28, 1, 2, C(70, 45, 30), 4);    // hair side
-            p.Rect(11, 28, 1, 2, C(70, 45, 30), 4);
-            p.Rect(5, 27, 2, 1, C(240, 240, 240), 0); // eyes (white)
-            p.Rect(9, 27, 2, 1, C(240, 240, 240), 0);
-            p.Rect(6, 27, 1, 1, C(60, 60, 170), 0);   // pupils
-            p.Rect(9, 27, 1, 1, C(60, 60, 170), 0);
-            p.Rect(6, 25, 4, 1, C(120, 70, 60), 0);   // mouth
-            playerSprite = Sprite.Create(p.ToTexture(), new Rect(0, 0, 16, 32), new Vector2(0.5f, 0f), 16f);
+            // Player persona: 16 x 36. Per flame flicker (2): frames 0-8 = front/back/side x
+            // (stand, walk A, walk B), frames 9 and 10 = the building animation.
+            playerFrames = new Sprite[22];
+            for (int fl = 0; fl < 2; fl++)
+            {
+                for (int v = 0; v < 3; v++)
+                {
+                    for (int st = 0; st < 3; st++) playerFrames[fl * 11 + v * 3 + st] = MakePlayerFrame(v, st, 0, fl);
+                }
+                playerFrames[fl * 11 + 9] = MakePlayerFrame(0, 0, 1, fl);
+                playerFrames[fl * 11 + 10] = MakePlayerFrame(0, 0, 2, fl);
+            }
+            playerSprite = playerFrames[0];
 
             // Creeper: 16 x 28
             var c = new Pix(16, 28);
@@ -329,6 +505,7 @@ namespace CupMine
         void Update()
         {
             scanTimer += Time.unscaledDeltaTime;
+            if (buildTimer > 0f) buildTimer -= Time.deltaTime;
             if (scanTimer > 0.4f)
             {
                 scanTimer = 0f;
@@ -365,6 +542,51 @@ namespace CupMine
                 for (int j = 0; j < s.hidden.Count; j++)
                 {
                     if (s.hidden[j] != null) s.hidden[j].enabled = false;
+                }
+
+                // Animation: pick front/back/side view from the direction of travel, swap
+                // walk frames while moving, and play the building pose after placing a block.
+                if (s.skinSr != null)
+                {
+                    Vector3 rp = s.root.position;
+                    float ddx = s.hasLast ? rp.x - s.lastX : 0f;
+                    float ddy = s.hasLast ? rp.y - s.lastY : 0f;
+                    s.lastX = rp.x;
+                    s.lastY = rp.y;
+                    s.hasLast = true;
+                    bool moving = Mathf.Abs(ddx) > 0.002f || Mathf.Abs(ddy) > 0.002f;
+
+                    int view = 2;
+                    if (s.isMap)
+                    {
+                        if (moving)
+                        {
+                            if (Mathf.Abs(ddy) > Mathf.Abs(ddx) * 1.2f) s.mapView = ddy > 0f ? 1 : 0;
+                            else s.mapView = 2;
+                        }
+                        view = s.mapView;
+                    }
+                    if (Mathf.Abs(ddx) > 0.002f) s.faceDir = ddx > 0f ? 1f : -1f;
+
+                    int step = 0;
+                    if (moving)
+                    {
+                        s.animT += Time.deltaTime;
+                        step = ((int)(s.animT * 8f)) % 2 == 0 ? 1 : 2;
+                    }
+                    else
+                    {
+                        s.animT = 0f;
+                    }
+                    if (!s.isMap && Mathf.Abs(ddy) > 0.01f) step = 1; // in the air
+
+                    int flicker = (((int)(Time.time * 6f)) % 2) * 11;
+                    Sprite frame = playerFrames[flicker + view * 3 + step];
+                    if (buildTimer > 0f) frame = playerFrames[flicker + 9 + (((int)(buildTimer * 8f)) % 2)];
+                    s.skinSr.sprite = frame;
+
+                    float ps = s.skin.transform.lossyScale.x >= 0f ? 1f : -1f;
+                    s.skinSr.flipX = (s.faceDir * ps) < 0f;
                 }
             }
         }
@@ -404,7 +626,7 @@ namespace CupMine
                     bool pany = false;
                     foreach (var r in prs)
                     {
-                        if (!r.enabled || r.sprite == null) continue;
+                        if (!r.enabled || r.sprite == null || !IsPlayerArt(r)) continue;
                         if (!pany) { pb = r.bounds; pany = true; }
                         else pb.Encapsulate(r.bounds);
                     }
@@ -442,7 +664,7 @@ namespace CupMine
             s.hidden.Clear();
             foreach (var r in GetRenderers(s.root, true))
             {
-                if (r.gameObject != s.skin) s.hidden.Add(r);
+                if (r.gameObject != s.skin && IsPlayerArt(r)) s.hidden.Add(r);
             }
         }
 
@@ -453,7 +675,7 @@ namespace CupMine
             bool any = false;
             foreach (var r in rs)
             {
-                if (!r.enabled || r.sprite == null) continue;
+                if (!r.enabled || r.sprite == null || !IsPlayerArt(r)) continue;
                 if (!any)
                 {
                     b = r.bounds;
@@ -493,7 +715,9 @@ namespace CupMine
                 scale / Mathf.Max(Mathf.Abs(ls.y), 0.0001f),
                 1f);
 
-            var s = new Skinned { root = root, skin = go };
+            var s = new Skinned { root = root, skin = go, skinSr = sr };
+            Type mapType = FindType("MapPlayerController");
+            s.isMap = mapType != null && root.GetComponent(mapType) != null;
             RefreshHidden(s);
             skinned.Add(s);
 
@@ -504,6 +728,15 @@ namespace CupMine
 
             Logger.LogInfo("Skin applied to " + root.name + ": renderers=" + rs.Length +
                 " height=" + b.size.y.ToString("0.00") + " layerId=" + layer + " order=" + (order + 1));
+        }
+
+        // The player's own sprites are small. Anything bigger (screen fades, backdrops) is ignored,
+        // so it can't throw off the skin's size or position, and is never hidden.
+        bool IsPlayerArt(SpriteRenderer r)
+        {
+            if (r.sprite == null) return false;
+            Vector3 size = r.bounds.size;
+            return size.x <= 5f && size.y <= 5f;
         }
 
         // Finds the sprites that draw this player. If the controller object has none of its own,
@@ -529,7 +762,7 @@ namespace CupMine
             bool first = true;
             foreach (var r in rs)
             {
-                if (!r.enabled || r.sprite == null) continue;
+                if (!r.enabled || r.sprite == null || !IsPlayerArt(r)) continue;
                 int value = SortingLayer.GetLayerValueFromID(r.sortingLayerID);
                 if (first || value > bestValue || (value == bestValue && r.sortingOrder > order))
                 {
@@ -670,6 +903,7 @@ namespace CupMine
         // Stone and grass slots: drop a block next to the player that fades away after a few seconds.
         void PlaceBlock(int slot)
         {
+            buildTimer = 0.5f;
             var go = new GameObject("CupMineBlock");
             var sr = go.AddComponent<SpriteRenderer>();
             sr.sprite = blockSprites[slot];
