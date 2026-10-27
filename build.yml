@@ -1,0 +1,28 @@
+name: Build CupMine
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        unity: ["2017.4.40", "2018.4.36", "2019.4.40", "2021.3.33"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build for Unity ${{ matrix.unity }}
+        run: dotnet build CupMine.csproj -c Release -p:UnityVersion=${{ matrix.unity }} -o out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CupMine-for-Unity-${{ matrix.unity }}
+          path: out/CupMine.dll
