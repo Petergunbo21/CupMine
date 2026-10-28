@@ -12,7 +12,7 @@ namespace CupMine
     //  - Your character is drawn as a blocky pixel hero
     //  - Blocky green "creepers" wander in and go poof (cosmetic only, they never hurt you)
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.7.0")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.8.0")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
@@ -954,6 +954,10 @@ namespace CupMine
             {
                 int layer = FindGroundLayer();
                 if (layer >= 0) go.layer = layer;
+                if (!string.IsNullOrEmpty(groundTag))
+                {
+                    try { go.tag = groundTag; } catch (Exception) { }
+                }
                 var col = go.AddComponent<BoxCollider2D>();
                 col.size = new Vector2(1f, 1f);
                 col.offset = new Vector2(0f, 0.5f);
@@ -971,38 +975,92 @@ namespace CupMine
             });
         }
 
-        // Looks straight down from the player's feet and returns the physics layer of whatever
-        // solid thing is there, or -1 if nothing is found.
+        string groundTag;
+        bool loggedColliders;
+        int groundLogCount;
+
+        // Looks straight down from the player's feet for the floor and returns its physics layer,
+        // or -1 if nothing is found. Trigger colliders count too, because the game may use them.
         int FindGroundLayer()
         {
             try
             {
+                float tol = 0.6f * skinScale;
                 Vector2 origin = new Vector2(playerPos.x, groundY - 0.05f * skinScale);
                 RaycastHit2D[] hits = Physics2D.RaycastAll(origin, Vector2.down, 4f * skinScale);
+                Collider2D best = null;
                 foreach (var h in hits)
                 {
-                    if (h.collider == null || h.collider.isTrigger) continue;
-                    if (h.collider.gameObject.name == "CupMineBlock") continue;
-                    Logger.LogInfo("Block layer " + h.collider.gameObject.layer + " (from " + h.collider.gameObject.name + ")");
-                    return h.collider.gameObject.layer;
+                    Collider2D hc = h.collider;
+                    if (hc == null || hc.gameObject.name == "CupMineBlock") continue;
+                    if (best == null) best = hc;
+                    if (Mathf.Abs(hc.bounds.max.y - groundY) <= tol) { best = hc; break; }
                 }
 
-                foreach (var c in UnityEngine.Object.FindObjectsOfType<Collider2D>())
+                if (best == null)
                 {
-                    if (c == null || c.isTrigger) continue;
-                    if (c.gameObject.name.ToLower().Contains("ground"))
+                    foreach (var c in UnityEngine.Object.FindObjectsOfType<Collider2D>())
                     {
-                        Logger.LogInfo("Block layer " + c.gameObject.layer + " (by name " + c.gameObject.name + ")");
-                        return c.gameObject.layer;
+                        if (c == null || c.gameObject.name == "CupMineBlock") continue;
+                        string n = c.gameObject.name.ToLower();
+                        if (n.Contains("ground") || n.Contains("floor") || n.Contains("platform")) { best = c; break; }
                     }
+                }
+
+                if (best != null)
+                {
+                    GameObject g = best.gameObject;
+                    groundTag = g.tag;
+                    if (groundLogCount < 3)
+                    {
+                        groundLogCount++;
+                        string comps = "";
+                        foreach (var comp in g.GetComponents<Component>())
+                        {
+                            if (comp != null) comps += comp.GetType().Name + " ";
+                        }
+                        Logger.LogInfo("Block layer " + g.layer + " (" + LayerMask.LayerToName(g.layer) + ") from " + g.name +
+                            " tag=" + g.tag + " trigger=" + best.isTrigger + " components: " + comps);
+                    }
+                    return g.layer;
+                }
+
+                if (!loggedColliders)
+                {
+                    loggedColliders = true;
+                    LogNearbyColliders();
                 }
             }
             catch (Exception e)
             {
                 Logger.LogWarning("Block layer search failed: " + e.Message);
             }
-            Logger.LogInfo("Block layer: no ground found, using default");
+
+            if (groundLogCount < 3)
+            {
+                groundLogCount++;
+                Logger.LogInfo("Block layer: no ground found, using default");
+            }
             return -1;
+        }
+
+        // Writes the colliders near the player to the log, to show how the level's floor is built.
+        void LogNearbyColliders()
+        {
+            float vh = ViewHeight();
+            int shown = 0;
+            Collider2D[] all = UnityEngine.Object.FindObjectsOfType<Collider2D>();
+            Logger.LogInfo("Colliders in scene: " + all.Length);
+            foreach (var c in all)
+            {
+                if (c == null || shown >= 25) break;
+                Bounds b = c.bounds;
+                if (Mathf.Abs(b.center.x - playerPos.x) > vh * 1.5f || Mathf.Abs(b.center.y - groundY) > vh) continue;
+                shown++;
+                GameObject g = c.gameObject;
+                Logger.LogInfo("  collider " + g.name + " layer=" + g.layer + "(" + LayerMask.LayerToName(g.layer) + ") trigger=" +
+                    c.isTrigger + " top=" + b.max.y.ToString("0") + " size=" + b.size.x.ToString("0") + "x" + b.size.y.ToString("0"));
+            }
         }
 
         void UseItem(int slot)
