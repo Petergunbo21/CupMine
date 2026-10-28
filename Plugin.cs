@@ -12,7 +12,7 @@ namespace CupMine
     //  - Your character is drawn as a blocky pixel hero
     //  - Blocky green "creepers" wander in and go poof (cosmetic only, they never hurt you)
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.6.0")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.7.0")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
@@ -65,6 +65,8 @@ namespace CupMine
 
         float scanTimer;
         float buildTimer;
+        bool mapMode;
+        float lastFace = 1f;
         float spawnTimer = 4f;
         bool inLevel;
         int hp = -1;
@@ -567,6 +569,7 @@ namespace CupMine
                         view = s.mapView;
                     }
                     if (Mathf.Abs(ddx) > 0.002f) s.faceDir = ddx > 0f ? 1f : -1f;
+                    lastFace = s.faceDir;
 
                     int step = 0;
                     if (moving)
@@ -613,6 +616,7 @@ namespace CupMine
             {
                 Transform pt = found[0].transform;
                 playerPos = pt.position;
+                mapMode = found[0].GetType().Name == "MapPlayerController";
 
                 // Learn where the ground is and which draw layer the player uses,
                 // even if the blocky skin can't be applied.
@@ -698,7 +702,7 @@ namespace CupMine
                 return; // sprites not ready yet, try again next scan
             }
 
-            float height = Mathf.Clamp(b.size.y, 0.4f, 6f);
+            float height = Mathf.Max(b.size.y, 0.05f);
             float scale = height / 2f; // the blocky sprite is 2 world units tall at scale 1
 
             var go = new GameObject("CupMineSkin");
@@ -730,13 +734,29 @@ namespace CupMine
                 " height=" + b.size.y.ToString("0.00") + " layerId=" + layer + " order=" + (order + 1));
         }
 
-        // The player's own sprites are small. Anything bigger (screen fades, backdrops) is ignored,
-        // so it can't throw off the skin's size or position, and is never hidden.
+        // The player's own sprites are small compared to the screen. Anything bigger (screen fades,
+        // backdrops) is ignored, so it can't throw off the skin's size or position, and is never hidden.
+        // Sizes are judged against the camera view, because levels and the map use different units.
         bool IsPlayerArt(SpriteRenderer r)
         {
             if (r.sprite == null) return false;
             Vector3 size = r.bounds.size;
-            return size.x <= 5f && size.y <= 5f;
+            float viewH = ViewHeight();
+            return size.y <= viewH * 0.45f && size.x <= viewH * 0.6f;
+        }
+
+        float ViewHeight()
+        {
+            Camera cam = Camera.main;
+            if (cam == null || !cam.orthographic)
+            {
+                cam = null;
+                foreach (var c in Camera.allCameras)
+                {
+                    if (c != null && c.orthographic) { cam = c; break; }
+                }
+            }
+            return cam != null ? cam.orthographicSize * 2f : 10f;
         }
 
         // Finds the sprites that draw this player. If the controller object has none of its own,
@@ -862,10 +882,10 @@ namespace CupMine
                 {
                     go = go,
                     sr = sr,
-                    vel = new Vector3(Mathf.Cos(ang) * spd, Mathf.Sin(ang) * spd + 1f, 0f),
+                    vel = new Vector3(Mathf.Cos(ang) * spd, Mathf.Sin(ang) * spd + skinScale, 0f),
                     life = 0.7f,
                     maxLife = 0.7f,
-                    gravity = 6f,
+                    gravity = 8f * skinScale,
                     tint = Color.white
                 });
             }
@@ -900,27 +920,89 @@ namespace CupMine
             }
         }
 
-        // Stone and grass slots: drop a block next to the player that fades away after a few seconds.
+        // Stone and grass slots: place a solid block in front of the player. Place more at the same
+        // spot to stack them into steps. In levels the block copies the physics layer of the ground
+        // under the player so the game treats it as floor. The oldest block goes when there are 8.
         void PlaceBlock(int slot)
         {
             buildTimer = 0.5f;
+
+            float size = skinScale;
+            float bx = playerPos.x + lastFace * 1.3f * size;
+            float by = groundY;
+            int count = 0;
+            Puff oldest = null;
+            foreach (var q in puffs)
+            {
+                if (q.go == null || q.go.name != "CupMineBlock") continue;
+                count++;
+                if (oldest == null || q.life < oldest.life) oldest = q;
+                Vector3 qp = q.go.transform.position;
+                if (Mathf.Abs(qp.x - bx) < 0.5f * size && qp.y + size > by) by = qp.y + size;
+            }
+            if (count >= 8 && oldest != null) oldest.life = 0.3f;
+
             var go = new GameObject("CupMineBlock");
             var sr = go.AddComponent<SpriteRenderer>();
             sr.sprite = blockSprites[slot];
             sr.sortingLayerID = skinLayerId;
             sr.sortingOrder = skinOrder;
-            go.transform.position = new Vector3(playerPos.x + 1.3f * skinScale, groundY, 0f);
-            go.transform.localScale = new Vector3(skinScale, skinScale, 1f);
+            go.transform.position = new Vector3(bx, by, 0f);
+            go.transform.localScale = new Vector3(size, size, 1f);
+
+            if (!mapMode)
+            {
+                int layer = FindGroundLayer();
+                if (layer >= 0) go.layer = layer;
+                var col = go.AddComponent<BoxCollider2D>();
+                col.size = new Vector2(1f, 1f);
+                col.offset = new Vector2(0f, 0.5f);
+            }
+
             puffs.Add(new Puff
             {
                 go = go,
                 sr = sr,
                 vel = Vector3.zero,
-                life = 4f,
-                maxLife = 4f,
+                life = 25f,
+                maxLife = 25f,
                 gravity = 0f,
                 tint = Color.white
             });
+        }
+
+        // Looks straight down from the player's feet and returns the physics layer of whatever
+        // solid thing is there, or -1 if nothing is found.
+        int FindGroundLayer()
+        {
+            try
+            {
+                Vector2 origin = new Vector2(playerPos.x, groundY - 0.05f * skinScale);
+                RaycastHit2D[] hits = Physics2D.RaycastAll(origin, Vector2.down, 4f * skinScale);
+                foreach (var h in hits)
+                {
+                    if (h.collider == null || h.collider.isTrigger) continue;
+                    if (h.collider.gameObject.name == "CupMineBlock") continue;
+                    Logger.LogInfo("Block layer " + h.collider.gameObject.layer + " (from " + h.collider.gameObject.name + ")");
+                    return h.collider.gameObject.layer;
+                }
+
+                foreach (var c in UnityEngine.Object.FindObjectsOfType<Collider2D>())
+                {
+                    if (c == null || c.isTrigger) continue;
+                    if (c.gameObject.name.ToLower().Contains("ground"))
+                    {
+                        Logger.LogInfo("Block layer " + c.gameObject.layer + " (by name " + c.gameObject.name + ")");
+                        return c.gameObject.layer;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("Block layer search failed: " + e.Message);
+            }
+            Logger.LogInfo("Block layer: no ground found, using default");
+            return -1;
         }
 
         void UseItem(int slot)
@@ -959,7 +1041,7 @@ namespace CupMine
                 }
                 p.vel.y -= p.gravity * dt;
                 p.go.transform.position += p.vel * dt;
-                p.sr.color = new Color(p.tint.r, p.tint.g, p.tint.b, Mathf.Clamp01(p.life / p.maxLife));
+                p.sr.color = new Color(p.tint.r, p.tint.g, p.tint.b, Mathf.Clamp01(p.life / Mathf.Min(p.maxLife, 1f)));
             }
         }
 
