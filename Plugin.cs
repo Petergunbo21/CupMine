@@ -14,7 +14,7 @@ namespace CupMine
     //    own damage system (DamageReceiver.TakeDamage). They never hurt the player.
     //  - Solid blocks: layer/tag setup copied from what Assembly-CSharp.dll shows the game checks
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.9.0")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.9.1")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
@@ -367,6 +367,34 @@ namespace CupMine
             return Sprite.Create(p.ToTexture(), new Rect(0, 0, 16, 36), new Vector2(0.5f, 0f), 16f);
         }
 
+        // Replaces the pixel-art persona with sprites rendered from the user's 3D avatar. The sheet is
+        // embedded in PersonaData.cs. If anything goes wrong the pixel-art persona stays.
+        void LoadModelFrames()
+        {
+            try
+            {
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!tex.LoadImage(Convert.FromBase64String(PersonaData.Sheet))) { Logger.LogWarning("Persona sheet: LoadImage failed"); return; }
+                tex.filterMode = FilterMode.Bilinear;
+                tex.wrapMode = TextureWrapMode.Clamp;
+                int cw = PersonaData.CellW, ch = PersonaData.CellH;
+                if (tex.width != cw * PersonaData.Cols || tex.height != ch * PersonaData.Rows) { Logger.LogWarning("Persona sheet: unexpected size " + tex.width + "x" + tex.height); return; }
+                float ppu = ch / 2.25f; // keeps the sprite 2.25 units tall like the pixel-art persona
+                for (int i = 0; i < 11; i++)
+                {
+                    int col = i % PersonaData.Cols, row = i / PersonaData.Cols;
+                    Sprite sp = Sprite.Create(tex, new Rect(col * cw, (PersonaData.Rows - 1 - row) * ch, cw, ch), new Vector2(0.5f, 0f), ppu);
+                    playerFrames[i] = sp;
+                    playerFrames[11 + i] = sp;
+                }
+                Logger.LogInfo("Persona sheet loaded: " + tex.width + "x" + tex.height);
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("Persona sheet failed: " + e.Message);
+            }
+        }
+
         void BuildArt()
         {
             // Player persona: 16 x 36. Per flame flicker (2): frames 0-8 = front/back/side x
@@ -381,6 +409,7 @@ namespace CupMine
                 playerFrames[fl * 11 + 9] = MakePlayerFrame(0, 0, 1, fl);
                 playerFrames[fl * 11 + 10] = MakePlayerFrame(0, 0, 2, fl);
             }
+            LoadModelFrames();
             playerSprite = playerFrames[0];
 
             // Creeper: 16 x 28
