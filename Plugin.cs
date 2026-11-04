@@ -14,17 +14,20 @@ namespace CupMine
     //    own damage system (DamageReceiver.TakeDamage). They never hurt the player.
     //  - Solid blocks: layer/tag setup copied from what Assembly-CSharp.dll shows the game checks
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.9.3")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.9.8")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
-        ConfigEntry<float> cfgPersonaScale, cfgCreeperDamage, cfgBlast, cfgMapScale;
+        ConfigEntry<float> cfgPersonaScale, cfgCreeperDamage, cfgBlast, cfgMapScale, cfgBlockScale;
 
         Texture2D slotTex, selTex, heartTex;
         Texture2D[] icons;
         Sprite playerSprite, creeperSprite, puffSprite;
         Sprite[] creeperFrames;
         Sprite[] playerFrames;
+        Sprite[] parryFrames;              // 4-frame tumble while parrying
+        Sprite[] aimFrames;                // 0 down, 1 diagonal down, 2 forward, 3 diagonal up, 4 up
+        Sprite[] duckFrames;               // [0] front, [1] side: the crouch pose
 
         class Skinned
         {
@@ -34,6 +37,10 @@ namespace CupMine
             public Component controller;   // LevelPlayerController or MapPlayerController
             public Component colliderMgr;  // LevelPlayerColliderManager (levels only)
             public Component motor;        // LevelPlayerMotor (levels only)
+            public Component parryCtl;     // LevelPlayerParryController (levels only)
+            public float parryT;           // seconds spent in the current parry
+            public Component weaponMgr;    // LevelPlayerWeaponManager (levels only)
+            public float aimHold;          // keeps the aim pose briefly after the last shot
             public float refreshT;         // seconds until the next hide/sort refresh
             public bool levelAnchor;       // true = persona is placed from the game's own hitbox
             public float lastX;
@@ -106,6 +113,7 @@ namespace CupMine
             cfgSkin = Config.Bind("General", "BlockySkin", true, "Draw the player as a blocky character.");
             cfgCreepers = Config.Bind("General", "Creepers", true, "Let creepers walk to enemies and blast them.");
             cfgPersonaScale = Config.Bind("General", "PersonaScale", 1.0f, "Persona size compared to Cuphead's hitbox (1 = default, bigger = larger).");
+            cfgBlockScale = Config.Bind("General", "BlockScale", 1.8f, "Size of placed blocks compared to the persona (bigger = larger blocks).");
             cfgMapScale = Config.Bind("General", "MapScale", 0.55f, "Persona size on the overworld map (smaller = smaller character).");
             cfgCreeperDamage = Config.Bind("Creepers", "Damage", 10.0f, "Damage a creeper blast deals to each enemy it hits.");
             cfgBlast = Config.Bind("Creepers", "BlastRadius", 1.6f, "Creeper blast radius, in persona heights.");
@@ -390,6 +398,27 @@ namespace CupMine
                     Sprite sp = Sprite.Create(tex, new Rect(col * cw, (PersonaData.Rows - 1 - row) * ch, cw, ch), new Vector2(0.5f, 0f), ppu);
                     playerFrames[i] = sp;
                     playerFrames[11 + i] = sp;
+                }
+                duckFrames = new Sprite[2];
+                for (int k = 0; k < 2; k++)
+                {
+                    int di = 11 + k;
+                    int dcol = di % PersonaData.Cols, drow = di / PersonaData.Cols;
+                    duckFrames[k] = Sprite.Create(tex, new Rect(dcol * cw, (PersonaData.Rows - 1 - drow) * ch, cw, ch), new Vector2(0.5f, 0f), ppu);
+                }
+                aimFrames = new Sprite[5];
+                for (int k = 0; k < 5; k++)
+                {
+                    int ai2 = 13 + k;
+                    int acol = ai2 % PersonaData.Cols, arow = ai2 / PersonaData.Cols;
+                    aimFrames[k] = Sprite.Create(tex, new Rect(acol * cw, (PersonaData.Rows - 1 - arow) * ch, cw, ch), new Vector2(0.5f, 0f), ppu);
+                }
+                parryFrames = new Sprite[4];
+                for (int k = 0; k < 4; k++)
+                {
+                    int pi2 = 18 + k;
+                    int pcol = pi2 % PersonaData.Cols, prow = pi2 / PersonaData.Cols;
+                    parryFrames[k] = Sprite.Create(tex, new Rect(pcol * cw, (PersonaData.Rows - 1 - prow) * ch, cw, ch), new Vector2(0.5f, 0f), ppu);
                 }
                 Logger.LogInfo("Persona sheet loaded: " + tex.width + "x" + tex.height);
             }
@@ -746,12 +775,33 @@ namespace CupMine
             return height > 0.01f;
         }
 
+        // Lines the persona up with the game's live hitbox: LevelPlayerColliderManager.Center / Height
+        // change while ducking, dashing or in the air. The default hitbox is the fallback, and the
+        // live values are only trusted if they sit near it (guards against a different coordinate space).
         void PositionLevelSkin(Skinned sk)
         {
             Vector2 c;
             float h;
             if (!ReadAnchor(sk, out c, out h)) return;
-            sk.skin.transform.position = new Vector3(c.x, c.y - h * 0.5f, sk.root.position.z);
+            float feetY = c.y - h * 0.5f;
+            float x = c.x;
+            object lc = CallGet(sk.colliderMgr, "Center");
+            object lh = CallGet(sk.colliderMgr, "Height");
+            if (lc != null && lh != null)
+            {
+                try
+                {
+                    Vector2 cv = (Vector2)lc;
+                    float hv = Convert.ToSingle(lh);
+                    if (hv > 0.01f && Mathf.Abs(cv.x - c.x) < h * 2f && Mathf.Abs(cv.y - c.y) < h * 2f)
+                    {
+                        feetY = cv.y - hv * 0.5f;
+                        x = cv.x;
+                    }
+                }
+                catch (Exception) { }
+            }
+            sk.skin.transform.position = new Vector3(x, feetY, sk.root.position.z);
         }
 
         // Picks the sprite: front/back/side view from the direction of travel (map), walk frames
@@ -830,6 +880,60 @@ namespace CupMine
                 int flicker = (((int)(Time.time * 6f)) % 2) * 11;
                 Sprite frame = playerFrames[flicker + view * 3 + step];
                 if (buildTimer > 0f) frame = playerFrames[flicker + 9 + (((int)(buildTimer * 8f)) % 2)];
+                if (!sk.isMap && sk.weaponMgr != null && aimFrames != null)
+                {
+                    // LevelPlayerWeaponManager.currentPose: 0 Forward, 1 Forward_R, 2 Up, 3 Up_D, 4 Up_D_R,
+                    // 5 Down, 6 Down_D, 7 Duck, 8 Jump, 9 Ex (values read from Assembly-CSharp.dll)
+                    object sh = CallGet(sk.weaponMgr, "IsShooting");
+                    if (sh is bool && (bool)sh) sk.aimHold = 0.3f;
+                    else if (sk.aimHold > 0f) sk.aimHold -= Time.deltaTime;
+                    if (sk.aimHold > 0f)
+                    {
+                        int pv = -1;
+                        try
+                        {
+                            object po = CallGet(sk.weaponMgr, "currentPose");
+                            if (po != null) pv = Convert.ToInt32(po);
+                        }
+                        catch (Exception) { }
+                        int ai = -1;
+                        switch (pv)
+                        {
+                            case 0: case 1: case 8: case 9: ai = 2; break;
+                            case 2: ai = 4; break;
+                            case 3: case 4: ai = 3; break;
+                            case 6: ai = 1; break;
+                            case 5: ai = 0; break;
+                        }
+                        if (ai >= 0) frame = aimFrames[ai];
+                    }
+                }
+                if (!sk.isMap && sk.motor != null && duckFrames != null)
+                {
+                    object dk = CallGet(sk.motor, "Ducking");
+                    if (dk is bool && (bool)dk) frame = duckFrames[1];
+                }
+                if (!sk.isMap && sk.parryCtl != null && parryFrames != null)
+                {
+                    // LevelPlayerParryController.State: 0 Init, 1 Ready, 2 Parrying (read from Assembly-CSharp.dll).
+                    // An air jump starts a parry whether or not it hits a pink object.
+                    int pst = -1;
+                    try
+                    {
+                        object po = CallGet(sk.parryCtl, "State");
+                        if (po != null) pst = Convert.ToInt32(po);
+                    }
+                    catch (Exception) { }
+                    if (pst == 2)
+                    {
+                        sk.parryT += Time.deltaTime;
+                        frame = parryFrames[((int)(sk.parryT * 16f)) % 4];
+                    }
+                    else
+                    {
+                        sk.parryT = 0f;
+                    }
+                }
                 sk.skinSr.sprite = frame;
 
                 // A skin parented to the player inherits the player's flip; the level skin does not.
@@ -934,7 +1038,7 @@ namespace CupMine
                         object g = CallGet(motor, "Grounded");
                         bool grounded = g is bool && (bool)g;
                         if (groundY == float.MaxValue || grounded) groundY = feet;
-                        skinScale = hv * 1.25f * cfgPersonaScale.Value / 2.25f;
+                        skinScale = hv * 1.08f * cfgPersonaScale.Value / 2.25f;
                         playerPos = new Vector3(cv.x, feet, ctl.transform.position.z);
                     }
                 }
@@ -1055,6 +1159,8 @@ namespace CupMine
             {
                 sk.colliderMgr = CallGet(controller, "colliderManager") as Component;
                 sk.motor = CallGet(controller, "motor") as Component;
+                sk.weaponMgr = CallGet(controller, "weaponManager") as Component;
+                sk.parryCtl = CallGet(controller, "parryController") as Component;
                 anchored = ReadAnchor(sk, out c, out h);
             }
 
@@ -1063,7 +1169,7 @@ namespace CupMine
             {
                 // Level: sit on the game's own player hitbox. The skin is not parented to the player,
                 // it is moved onto the hitbox every frame (see PositionLevelSkin).
-                scale = h * 1.25f * cfgPersonaScale.Value / 2.25f;
+                scale = h * 1.08f * cfgPersonaScale.Value / 2.25f;
                 go.transform.localScale = new Vector3(scale, scale, 1f);
                 go.transform.position = new Vector3(c.x, c.y - h * 0.5f, root.position.z);
                 sk.levelAnchor = true;
@@ -1270,9 +1376,9 @@ namespace CupMine
             if (cfgCreepers.Value && cam != null && (mapMode || enemyList.Count > 0))
             {
                 spawnTimer -= dt;
-                if (spawnTimer <= 0f && creepers.Count < 3)
+                if (spawnTimer <= 0f && creepers.Count < 4)
                 {
-                    spawnTimer = UnityEngine.Random.Range(6f, 10f);
+                    spawnTimer = UnityEngine.Random.Range(3f, 5f);
                     SpawnCreeper(cam);
                 }
             }
@@ -1291,20 +1397,20 @@ namespace CupMine
                     if (!mapMode && (c.target == null || c.retarget <= 0f))
                     {
                         c.target = PickTarget(pos, cam);
-                        c.retarget = 1f;
+                        c.retarget = 0.25f;   // re-aim often: enemies run, jump and fly
                     }
 
                     bool hasTarget = c.target != null;
                     float goalX = hasTarget ? c.target.position.x : playerPos.x;
                     float dx = goalX - pos.x;
-                    float stopAt = hasTarget ? 1.8f * skinScale : 2.4f * skinScale;
+                    float stopAt = hasTarget ? 2.2f * skinScale : 2.4f * skinScale;
 
                     if (Mathf.Abs(dx) > stopAt)
                     {
                         c.dir = dx >= 0f ? 1f : -1f;
-                        pos.x += c.dir * 3.6f * skinScale * dt;
+                        pos.x += c.dir * 7f * skinScale * dt;   // sprint
                         c.go.transform.position = pos;
-                        c.sr.sprite = creeperFrames[((int)(c.age * 14f)) % 4];
+                        c.sr.sprite = creeperFrames[((int)(c.age * 20f)) % 4];
                         c.sr.flipX = c.dir < 0f;
                     }
                     else if (hasTarget || mapMode)
@@ -1325,14 +1431,35 @@ namespace CupMine
                 else
                 {
                     c.fuse += dt;
-                    c.sr.sprite = creeperFrames[6 + ((int)(c.fuse * 20f)) % 2];   // crouch and shake
+                    // keeps charging at the enemy while the fuse burns, then crouches for the last moment
+                    if (c.target != null)
+                    {
+                        float fdx = c.target.position.x - pos.x;
+                        if (Mathf.Abs(fdx) > 0.6f * skinScale)
+                        {
+                            c.dir = fdx >= 0f ? 1f : -1f;
+                            pos.x += c.dir * 7f * skinScale * dt;
+                            c.go.transform.position = pos;
+                            c.sr.flipX = c.dir < 0f;
+                        }
+                    }
+                    c.sr.sprite = c.fuse < 0.4f ? creeperFrames[((int)(c.age * 20f)) % 4] : creeperFrames[6 + ((int)(c.fuse * 20f)) % 2];
                     bool flash = ((int)(c.fuse * 10f)) % 2 == 0;
                     c.sr.color = flash ? Color.white : new Color(1f, 0.55f, 0.55f, 1f);
                     float pulse = 1f + 0.12f * Mathf.Sin(c.fuse * 30f);
                     c.go.transform.localScale = new Vector3(skinScale * pulse, skinScale * pulse, 1f);
-                    if (c.fuse >= 1.2f)
+                    if (c.fuse >= 0.55f)
                     {
-                        Blast(c.go.transform.position + new Vector3(0f, skinScale, 0f));
+                        // blast centre leans toward the enemy, so jumping and flying ones are caught too
+                        Vector3 bp = c.go.transform.position;
+                        float bY = bp.y + skinScale;
+                        float bX = bp.x;
+                        if (c.target != null)
+                        {
+                            bY = Mathf.Clamp(c.target.position.y, bp.y + 0.5f * skinScale, bp.y + 3.5f * skinScale);
+                            bX = bp.x + Mathf.Clamp(c.target.position.x - bp.x, -1.5f * skinScale, 1.5f * skinScale);
+                        }
+                        Blast(new Vector3(bX, bY, bp.z));
                         Destroy(c.go);
                         creepers.RemoveAt(i);
                     }
@@ -1453,17 +1580,17 @@ namespace CupMine
         {
             buildTimer = 0.5f;
 
-            float size = skinScale;
+            float size = skinScale * cfgBlockScale.Value;
             float bx = playerPos.x + lastFace * 1.3f * size;
             float by = groundY;
             bool air = false;
             float feetY = 0f, cx = 0f;
             if (!mapMode && PlayerInAir(out feetY, out cx))
             {
-                // jumping: put the block in front of the player at the player's own height
+                // jumping: put the block straight under the player so they can land on it
                 air = true;
-                bx = cx + lastFace * 1.3f * size;
-                by = feetY;
+                bx = cx;                      // straight under the player
+                by = feetY - size - 0.05f * size; // block top sits just below the feet
             }
             int count = 0;
             Puff oldest = null;
@@ -1475,7 +1602,7 @@ namespace CupMine
                 Vector3 qp = q.go.transform.position;
                 if (air)
                 {
-                    if (Mathf.Abs(qp.x - bx) < 0.5f * size && Mathf.Abs(qp.y - by) < 0.9f * size) by = qp.y + size;
+                    if (Mathf.Abs(qp.x - bx) < 0.9f * size && Mathf.Abs(qp.y - by) < 0.9f * size) by = qp.y - size;
                 }
                 else if (Mathf.Abs(qp.x - bx) < 0.5f * size && qp.y + size > by)
                 {
