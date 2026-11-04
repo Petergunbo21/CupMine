@@ -14,7 +14,7 @@ namespace CupMine
     //    own damage system (DamageReceiver.TakeDamage). They never hurt the player.
     //  - Solid blocks: layer/tag setup copied from what Assembly-CSharp.dll shows the game checks
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.9.8")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.9.7")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
@@ -25,7 +25,6 @@ namespace CupMine
         Sprite playerSprite, creeperSprite, puffSprite;
         Sprite[] creeperFrames;
         Sprite[] playerFrames;
-        Sprite[] parryFrames;              // 4-frame tumble while parrying
         Sprite[] aimFrames;                // 0 down, 1 diagonal down, 2 forward, 3 diagonal up, 4 up
         Sprite[] duckFrames;               // [0] front, [1] side: the crouch pose
 
@@ -37,8 +36,6 @@ namespace CupMine
             public Component controller;   // LevelPlayerController or MapPlayerController
             public Component colliderMgr;  // LevelPlayerColliderManager (levels only)
             public Component motor;        // LevelPlayerMotor (levels only)
-            public Component parryCtl;     // LevelPlayerParryController (levels only)
-            public float parryT;           // seconds spent in the current parry
             public Component weaponMgr;    // LevelPlayerWeaponManager (levels only)
             public float aimHold;          // keeps the aim pose briefly after the last shot
             public float refreshT;         // seconds until the next hide/sort refresh
@@ -412,13 +409,6 @@ namespace CupMine
                     int ai2 = 13 + k;
                     int acol = ai2 % PersonaData.Cols, arow = ai2 / PersonaData.Cols;
                     aimFrames[k] = Sprite.Create(tex, new Rect(acol * cw, (PersonaData.Rows - 1 - arow) * ch, cw, ch), new Vector2(0.5f, 0f), ppu);
-                }
-                parryFrames = new Sprite[4];
-                for (int k = 0; k < 4; k++)
-                {
-                    int pi2 = 18 + k;
-                    int pcol = pi2 % PersonaData.Cols, prow = pi2 / PersonaData.Cols;
-                    parryFrames[k] = Sprite.Create(tex, new Rect(pcol * cw, (PersonaData.Rows - 1 - prow) * ch, cw, ch), new Vector2(0.5f, 0f), ppu);
                 }
                 Logger.LogInfo("Persona sheet loaded: " + tex.width + "x" + tex.height);
             }
@@ -913,27 +903,6 @@ namespace CupMine
                     object dk = CallGet(sk.motor, "Ducking");
                     if (dk is bool && (bool)dk) frame = duckFrames[1];
                 }
-                if (!sk.isMap && sk.parryCtl != null && parryFrames != null)
-                {
-                    // LevelPlayerParryController.State: 0 Init, 1 Ready, 2 Parrying (read from Assembly-CSharp.dll).
-                    // An air jump starts a parry whether or not it hits a pink object.
-                    int pst = -1;
-                    try
-                    {
-                        object po = CallGet(sk.parryCtl, "State");
-                        if (po != null) pst = Convert.ToInt32(po);
-                    }
-                    catch (Exception) { }
-                    if (pst == 2)
-                    {
-                        sk.parryT += Time.deltaTime;
-                        frame = parryFrames[((int)(sk.parryT * 16f)) % 4];
-                    }
-                    else
-                    {
-                        sk.parryT = 0f;
-                    }
-                }
                 sk.skinSr.sprite = frame;
 
                 // A skin parented to the player inherits the player's flip; the level skin does not.
@@ -1160,7 +1129,6 @@ namespace CupMine
                 sk.colliderMgr = CallGet(controller, "colliderManager") as Component;
                 sk.motor = CallGet(controller, "motor") as Component;
                 sk.weaponMgr = CallGet(controller, "weaponManager") as Component;
-                sk.parryCtl = CallGet(controller, "parryController") as Component;
                 anchored = ReadAnchor(sk, out c, out h);
             }
 
