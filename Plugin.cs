@@ -14,15 +14,16 @@ namespace CupMine
     //    own damage system (DamageReceiver.TakeDamage). They never hurt the player.
     //  - Solid blocks: layer/tag setup copied from what Assembly-CSharp.dll shows the game checks
     // All art is generated in code, so there are no extra files to install.
-    [BepInPlugin("local.cupmine", "CupMine", "0.9.1")]
+    [BepInPlugin("local.cupmine", "CupMine", "0.9.3")]
     public class Plugin : BaseUnityPlugin
     {
         ConfigEntry<bool> cfgHotbar, cfgSkin, cfgCreepers;
-        ConfigEntry<float> cfgPersonaScale, cfgCreeperDamage, cfgBlast;
+        ConfigEntry<float> cfgPersonaScale, cfgCreeperDamage, cfgBlast, cfgMapScale;
 
         Texture2D slotTex, selTex, heartTex;
         Texture2D[] icons;
         Sprite playerSprite, creeperSprite, puffSprite;
+        Sprite[] creeperFrames;
         Sprite[] playerFrames;
 
         class Skinned
@@ -33,6 +34,7 @@ namespace CupMine
             public Component controller;   // LevelPlayerController or MapPlayerController
             public Component colliderMgr;  // LevelPlayerColliderManager (levels only)
             public Component motor;        // LevelPlayerMotor (levels only)
+            public float refreshT;         // seconds until the next hide/sort refresh
             public bool levelAnchor;       // true = persona is placed from the game's own hitbox
             public float lastX;
             public float lastY;
@@ -76,6 +78,7 @@ namespace CupMine
         public static Plugin Instance;
         static readonly BindingFlags BF = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         bool loggedEnemies;
+        int hideLog;
         int visLayer;                      // GameObject layer that the game's cameras draw the player on
 
         static readonly string[] PlayerTypeNames = { "LevelPlayerController", "MapPlayerController" };
@@ -103,6 +106,7 @@ namespace CupMine
             cfgSkin = Config.Bind("General", "BlockySkin", true, "Draw the player as a blocky character.");
             cfgCreepers = Config.Bind("General", "Creepers", true, "Let creepers walk to enemies and blast them.");
             cfgPersonaScale = Config.Bind("General", "PersonaScale", 1.0f, "Persona size compared to Cuphead's hitbox (1 = default, bigger = larger).");
+            cfgMapScale = Config.Bind("General", "MapScale", 0.55f, "Persona size on the overworld map (smaller = smaller character).");
             cfgCreeperDamage = Config.Bind("Creepers", "Damage", 10.0f, "Damage a creeper blast deals to each enemy it hits.");
             cfgBlast = Config.Bind("Creepers", "BlastRadius", 1.6f, "Creeper blast radius, in persona heights.");
 
@@ -395,6 +399,75 @@ namespace CupMine
             }
         }
 
+        // The creeper replacement: an original pixel "blast pup" - a fluffy black dog with thick legs and
+        // big paws, glowing green patches, a floppy ear and a glowing tail tip. 32 x 22, faces right.
+        // frames 0-3 = gallop cycle, 4-5 = standing (tail wag), 6-7 = crouching and shaking before the blast.
+        // Pivot is bottom centre.
+        Sprite MakeBugFrame(int frame)
+        {
+            var p = new Pix(32, 22);
+            Color32 blk = C(14, 17, 18), blk2 = C(32, 38, 38), grn = C(70, 240, 110), grnD = C(34, 150, 74);
+            Color32 ink = C(4, 6, 6), paw = C(40, 47, 47);
+            bool fuse = frame >= 6;
+
+            // legs: x, y, height for back leg, back leg (far), front leg, front leg (far)
+            int[] lx, ly, lh;
+            switch (frame)
+            {
+                case 0: lx = new[] { 2, 7, 25, 20 }; ly = new[] { 0, 2, 0, 2 }; lh = new[] { 7, 5, 7, 5 }; break;
+                case 1: lx = new[] { 7, 11, 18, 22 }; ly = new[] { 1, 0, 0, 1 }; lh = new[] { 6, 7, 7, 6 }; break;
+                case 2: lx = new[] { 7, 2, 20, 25 }; ly = new[] { 2, 0, 2, 0 }; lh = new[] { 5, 7, 5, 7 }; break;
+                case 3: lx = new[] { 11, 7, 22, 18 }; ly = new[] { 0, 1, 1, 0 }; lh = new[] { 7, 6, 6, 7 }; break;
+                case 4:
+                case 5: lx = new[] { 4, 9, 24, 19 }; ly = new[] { 0, 0, 0, 0 }; lh = new[] { 7, 7, 7, 7 }; break;
+                default: lx = new[] { 4, 9, 24, 19 }; ly = new[] { 0, 0, 0, 0 }; lh = new[] { 5, 5, 5, 5 }; break;
+            }
+            int dy = (frame == 1 || frame == 3) ? 0 : 1;      // body bobs while running
+            if (frame >= 4 && frame <= 5) dy = 0;
+            if (fuse) dy = -1;                                // crouch
+            int dx = frame == 6 ? -1 : (frame == 7 ? 1 : 0);  // shake
+            int tw = frame == 4 ? 0 : (frame == 5 ? 2 : (frame % 2 == 0 ? 0 : 1)); // tail tip sways
+
+            // thick legs with big paws (far legs a little lighter)
+            for (int i = 3; i >= 0; i--)
+            {
+                Color32 lc = (i % 2 == 0) ? blk : blk2;
+                p.Rect(lx[i] + dx, ly[i], 4, lh[i], lc, 3);
+                p.Rect(lx[i] + dx, ly[i], 5, 2, paw, 2);
+            }
+
+            // fluffy body and chest
+            p.Rect(4 + dx, 6 + dy, 20, 8, blk, 4);
+            p.Rect(6 + dx, 14 + dy, 15, 1, blk, 4);
+            p.Rect(21 + dx, 7 + dy, 3, 6, blk2, 4);
+            // glowing patches
+            Color32 pg = fuse ? C(210, 255, 220) : grn;
+            p.Rect(7 + dx, 9 + dy, 3, 3, pg, 10);
+            p.Rect(13 + dx, 10 + dy, 3, 3, pg, 10);
+            p.Rect(17 + dx, 7 + dy, 2, 3, pg, 10);
+            p.Rect(10 + dx, 8 + dy, 2, 1, grnD, 0);
+            // green flame wisp on the back (flickers)
+            int fx = frame & 1;
+            p.Rect(11 + dx + fx, 15 + dy, 2, 2, grnD, 0);
+            p.Rect(12 + dx + fx, 17 + dy, 1, 2, grn, 0);
+            // tail with glowing tip
+            p.Rect(1 + dx, 13 + dy, 3, 5, blk, 3);
+            p.Rect(tw + dx, 18 + dy, 3, 3, grn, 8);
+
+            // big head, snout, nose, mouth
+            p.Rect(23 + dx, 10 + dy, 8, 9, blk, 4);
+            p.Rect(29 + dx, 11 + dy, 3, 4, blk2, 3);
+            p.Rect(31 + dx, 13 + dy, 1, 2, ink, 0);
+            p.Rect(29 + dx, 11 + dy, 3, 1, ink, 0);
+            // glowing eye (white-hot before the blast)
+            p.Rect(26 + dx, 15 + dy, 3, 3, fuse ? C(255, 255, 255) : grn, 0);
+            p.Rect(27 + dx, 16 + dy, 1, 1, fuse ? C(255, 120, 120) : C(190, 255, 205), 0);
+            // floppy ear
+            p.Rect(23 + dx, 15 + dy, 3, 5, blk2, 3);
+
+            return Sprite.Create(p.ToTexture(), new Rect(0, 0, 32, 22), new Vector2(0.5f, 0f), 15f);
+        }
+
         void BuildArt()
         {
             // Player persona: 16 x 36. Per flame flicker (2): frames 0-8 = front/back/side x
@@ -412,18 +485,10 @@ namespace CupMine
             LoadModelFrames();
             playerSprite = playerFrames[0];
 
-            // Creeper: 16 x 28
-            var c = new Pix(16, 28);
-            c.Rect(4, 0, 8, 6, C(70, 170, 70), 18);
-            c.Rect(4, 6, 8, 14, C(70, 170, 70), 18);
-            c.Rect(4, 20, 8, 8, C(80, 180, 80), 18);
-            c.Rect(5, 24, 2, 2, C(20, 40, 20), 0);   // eyes
-            c.Rect(9, 24, 2, 2, C(20, 40, 20), 0);
-            c.Rect(7, 22, 2, 2, C(20, 40, 20), 0);   // nose
-            c.Rect(6, 20, 1, 2, C(20, 40, 20), 0);   // mouth
-            c.Rect(9, 20, 1, 2, C(20, 40, 20), 0);
-            for (int y = 0; y < 6; y++) c.Rect(7, y, 2, 1, new Color32(0, 0, 0, 0), 0); // gap between feet
-            creeperSprite = Sprite.Create(c.ToTexture(), new Rect(0, 0, 16, 28), new Vector2(0.5f, 0f), 16f);
+            // Creeper replacement: an original pixel blast pup, 32 x 22, 8 animation frames.
+            creeperFrames = new Sprite[8];
+            for (int cf = 0; cf < 8; cf++) creeperFrames[cf] = MakeBugFrame(cf);
+            creeperSprite = creeperFrames[0];
 
             // Poof particle: 4 x 4
             var f = new Pix(4, 4);
@@ -457,12 +522,14 @@ namespace CupMine
             icons[2] = egg.ToTexture();
 
             var face = new Pix(16, 16);
-            face.Rect(0, 0, 16, 16, C(75, 175, 75), 18);
-            face.Rect(3, 9, 3, 3, C(20, 40, 20), 0);
-            face.Rect(10, 9, 3, 3, C(20, 40, 20), 0);
-            face.Rect(6, 5, 4, 4, C(20, 40, 20), 0);
-            face.Rect(4, 2, 2, 4, C(20, 40, 20), 0);
-            face.Rect(10, 2, 2, 4, C(20, 40, 20), 0);
+            face.Rect(0, 0, 16, 16, C(14, 20, 20), 6);
+            face.Rect(3, 2, 10, 9, C(24, 28, 28), 4);        // pup head
+            face.Rect(1, 8, 3, 6, C(40, 46, 46), 4);         // floppy ears
+            face.Rect(12, 8, 3, 6, C(40, 46, 46), 4);
+            face.Rect(5, 6, 2, 2, C(70, 240, 110), 0);       // glowing eyes
+            face.Rect(9, 6, 2, 2, C(70, 240, 110), 0);
+            face.Rect(7, 3, 2, 2, C(4, 6, 6), 0);            // nose
+            face.Rect(4, 11, 3, 2, C(70, 240, 110), 6);      // glowing patch
             icons[3] = face.ToTexture();
 
             var gem = new Pix(16, 16);
@@ -696,6 +763,20 @@ namespace CupMine
                 var sk = skinned[i];
                 if (sk.root == null || sk.skinSr == null) continue;
 
+                sk.refreshT -= Time.deltaTime;
+                if (sk.refreshT <= 0f)
+                {
+                    sk.refreshT = 0.15f;
+                    int before = sk.hidden.Count;
+                    RefreshHidden(sk);
+                    ResortSkin(sk);
+                    if (sk.hidden.Count != before && hideLog < 6)
+                    {
+                        hideLog++;
+                        Logger.LogInfo("Hidden original renderers: " + sk.hidden.Count + ", persona sortLayer=" + sk.skinSr.sortingLayerID + " order=" + sk.skinSr.sortingOrder);
+                    }
+                }
+
                 Vector3 rp = sk.root.position;
                 float ddx = sk.hasLast ? rp.x - sk.lastX : 0f;
                 float ddy = sk.hasLast ? rp.y - sk.lastY : 0f;
@@ -881,13 +962,48 @@ namespace CupMine
             return 0;
         }
 
+        // Everything the game draws for the player (Cuphead's body, shadow, effects) is hidden, except
+        // very large sprites (screen overlays) and the persona itself. Runs every 0.15 s, because the
+        // game switches sprites and spawns new renderers while the player moves.
         void RefreshHidden(Skinned s)
         {
             s.hidden.Clear();
+            float viewH = ViewHeight();
             foreach (var r in GetRenderers(s.root, true))
             {
-                if (r.gameObject != s.skin && IsPlayerArt(r)) s.hidden.Add(r);
+                if (r == null || r.gameObject == s.skin) continue;
+                Vector3 size = r.bounds.size;
+                if (r.sprite != null && (size.y > viewH * 0.9f || size.x > viewH * 1.2f)) continue;
+                s.hidden.Add(r);
             }
+        }
+
+        // Keeps the persona drawn above every renderer of the original player, in the highest
+        // sorting layer among them. Without this the original Cuphead can end up in front.
+        void ResortSkin(Skinned s)
+        {
+            if (s.skinSr == null) return;
+            int bestValue = int.MinValue;
+            int layerId = s.skinSr.sortingLayerID;
+            int order = s.skinSr.sortingOrder - 5;
+            bool any = false;
+            foreach (var r in GetRenderers(s.root, true))
+            {
+                if (r == null || r.gameObject == s.skin) continue;
+                int v = SortingLayer.GetLayerValueFromID(r.sortingLayerID);
+                if (!any || v > bestValue || (v == bestValue && r.sortingOrder > order))
+                {
+                    bestValue = v;
+                    layerId = r.sortingLayerID;
+                    order = r.sortingOrder;
+                    any = true;
+                }
+            }
+            if (!any) return;
+            s.skinSr.sortingLayerID = layerId;
+            s.skinSr.sortingOrder = order + 5;
+            skinLayerId = layerId;
+            skinOrder = order + 5;
         }
 
         void ApplySkin(Component controller)
@@ -1041,6 +1157,7 @@ namespace CupMine
 
         // Finds the sprites that draw this player. If the controller object has none of its own,
         // look one level up in case the art sits on the parent object.
+
         SpriteRenderer[] GetRenderers(Transform root, bool includeInactive)
         {
             SpriteRenderer[] rs = root.GetComponentsInChildren<SpriteRenderer>(includeInactive);
@@ -1185,22 +1302,30 @@ namespace CupMine
                     if (Mathf.Abs(dx) > stopAt)
                     {
                         c.dir = dx >= 0f ? 1f : -1f;
-                        pos.x += c.dir * 2.2f * skinScale * dt;
+                        pos.x += c.dir * 3.6f * skinScale * dt;
                         c.go.transform.position = pos;
+                        c.sr.sprite = creeperFrames[((int)(c.age * 14f)) % 4];
+                        c.sr.flipX = c.dir < 0f;
                     }
                     else if (hasTarget || mapMode)
                     {
                         c.fuse = 0f;
                     }
-                    else if (c.age > 90f)
+                    else
                     {
-                        Destroy(c.go);
-                        creepers.RemoveAt(i);
+                        c.sr.sprite = creeperFrames[4 + ((int)(c.age * 3f)) % 2];   // standing, tail wagging
+                        c.sr.flipX = dx < 0f;
+                        if (c.age > 90f)
+                        {
+                            Destroy(c.go);
+                            creepers.RemoveAt(i);
+                        }
                     }
                 }
                 else
                 {
                     c.fuse += dt;
+                    c.sr.sprite = creeperFrames[6 + ((int)(c.fuse * 20f)) % 2];   // crouch and shake
                     bool flash = ((int)(c.fuse * 10f)) % 2 == 0;
                     c.sr.color = flash ? Color.white : new Color(1f, 0.55f, 0.55f, 1f);
                     float pulse = 1f + 0.12f * Mathf.Sin(c.fuse * 30f);
@@ -1302,6 +1427,28 @@ namespace CupMine
         // Stone and grass slots: place a solid block in front of the player, facing the way the player
         // looks. Place more at the same spot to stack them into steps. The oldest block goes when
         // there are 8. In levels the block gets colliders the game's player motor and enemies react to.
+        // True while the player is in the air. Gives the feet height and hitbox centre x, read live
+        // from the game's own hitbox (LevelPlayerMotor.Grounded).
+        bool PlayerInAir(out float feetY, out float centerX)
+        {
+            feetY = 0f;
+            centerX = 0f;
+            for (int i = 0; i < skinned.Count; i++)
+            {
+                var sk = skinned[i];
+                if (sk.root == null || !sk.levelAnchor || sk.motor == null) continue;
+                object g = CallGet(sk.motor, "Grounded");
+                Vector2 c;
+                float h;
+                if (!(g is bool) || !ReadAnchor(sk, out c, out h)) continue;
+                if ((bool)g) return false;
+                feetY = c.y - h * 0.5f;
+                centerX = c.x;
+                return true;
+            }
+            return false;
+        }
+
         void PlaceBlock(int slot)
         {
             buildTimer = 0.5f;
@@ -1309,6 +1456,15 @@ namespace CupMine
             float size = skinScale;
             float bx = playerPos.x + lastFace * 1.3f * size;
             float by = groundY;
+            bool air = false;
+            float feetY = 0f, cx = 0f;
+            if (!mapMode && PlayerInAir(out feetY, out cx))
+            {
+                // jumping: put the block in front of the player at the player's own height
+                air = true;
+                bx = cx + lastFace * 1.3f * size;
+                by = feetY;
+            }
             int count = 0;
             Puff oldest = null;
             foreach (var q in puffs)
@@ -1317,7 +1473,14 @@ namespace CupMine
                 count++;
                 if (oldest == null || q.life < oldest.life) oldest = q;
                 Vector3 qp = q.go.transform.position;
-                if (Mathf.Abs(qp.x - bx) < 0.5f * size && qp.y + size > by) by = qp.y + size;
+                if (air)
+                {
+                    if (Mathf.Abs(qp.x - bx) < 0.5f * size && Mathf.Abs(qp.y - by) < 0.9f * size) by = qp.y + size;
+                }
+                else if (Mathf.Abs(qp.x - bx) < 0.5f * size && qp.y + size > by)
+                {
+                    by = qp.y + size;
+                }
             }
             if (count >= 8 && oldest != null) oldest.life = 0.3f;
 
